@@ -1,0 +1,9 @@
+Package: com.example.hellohybrid
+Name: HelloHybrid
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Минимальный UIViewController/UIView демо для проверки .ipa-сборщика
+Maintainer: Mint <mint@localhost>
+Author: Mint <mint@localhost>
+Section: Applications
+Depends: firmware (>= 13.0)

@@ -243,3 +243,51 @@ CERT_P12=~/certs/dev.p12 CERT_PASS='...' ./package_ipa.sh
 - **App Store / TestFlight:** НЕТ — туда только Xcode-archive
   (см. Способ A). Нативный .ipa не содержит нужных entitlements/Profile
   для стора.
+
+## 13. Swift под iOS: тир A (локально) vs тир B (раннер). Тир B — рекомендуемый
+
+Почему тир B рекомендуемый, честно: распространяемого Linux→iOS
+swift-frontend не существует как отдельный продукт (есть только
+внутри тулчейна Theos конкретной версии), а SDK с Swift-оверлеями не
+совпадают по версиям между релизами Xcode (оверлеи 5.8 требуют тулчейн
+ровно 5.8; чуть в сторону — и `os.swiftmodule` падает с `no type named
+'OSSignpostType'`). Любой апдейт SDK/тулчейна может разорвать связку
+молча — поэтому гарантированный путь один: собирать Swift там, где
+swift-frontend родной, т.е. на macOS-раннере, тем же `package_ipa.sh`.
+
+**Тир A (локальный, работает здесь и сейчас).** Условия, все проверены
+артефактами, а не словами:
+  - SDK содержит оверлеи: `usr/lib/swift/UIKit.swiftmodule/`,
+    `Foundation.framework/Modules/Foundation.swiftmodule`,
+    `SwiftUI.framework/Modules/SwiftUI.swiftmodule`, `libswift*.tbd`;
+  - модули собраны под Apple Swift 5.8 (`swiftlang-5.8.0.117.59`), тулчейн
+    Theos — `swift-frontend` 5.8-RELEASE: версии совпадают (`--doctor`);
+  - `swift-frontend -target arm64-apple-ios16.5 -sdk <SDK> -resource-dir
+    <тулчейн>/lib/swift` компилирует `import UIKit` в Mach-O arm64
+    с секциями `__swift5_*` (без `-resource-dir` — конфликт модулей
+    Dispatch с хостовыми, это не баг SDK, а неверный вызов);
+  - deployment target 13.0 (рантайм в самой iOS с 12.2, вшивать
+    `libswift*.dylib` в `Frameworks/` запрещено — `verify_ipa.sh` пункт 4
+    это проверяет).
+  Демо-таргет (файлы в `demo/HelloHybrid/`, живой инстанс —
+  `~/ios_projects/HelloHybrid/`): `main.m` (только `main`),
+  `HelloHybridAppDelegate.m` (окно + вызов Swift), `Greeter.h/.m`
+  (чистый ObjC), `Counter.swift` (`@objc`, зовёт `Greeter` — направление
+  Swift→ObjC), `Bridging-Header.h` (только ObjC-импорты, проверяется
+  `clang -fsyntax-only -target arm64-apple-ios13.0`), `Makefile`
+  с раздельными `_FILES`/`_SWIFT_FILES` (этого требует данная версия
+  Theos — оба списка линкуются в один бинарь), `verify_ipa.sh` в конце
+  `package_ipa.sh` (провал любого из 8 пунктов = провал сборки).
+  NB: §10 выше описывает старый состав демо (`SwiftLogic.swift`, 14.0) —
+  актуальный состав см. здесь.
+
+**Тир B (удалёный, гарантированный).** Файл
+`.github/workflows/swift-ios-build.yml`, запуск вручную
+(`workflow_dispatch`, inputs `project_path`=`demo/HelloHybrid`,
+`target`=`arm64-apple-ios13.0`): checkout → Theos clone → `install-sdk`
+при отсутствии SDK → `brew install dpkg ldid` → тот же
+`./package_ipa.sh` (+ `IOS_DEPLOY_TARGET` из input) → проверка
+`packages/*.ipa` → `upload-artifact` (`ipa`). С Linux-стороны:
+`bash mint_ios_setup.sh --remote-build [проект]` (gh + auth-проверка,
+кэш SDK в `~/.cache/srk801-sdk/`, ожидание с таймаутом 20 мин,
+скачивание артефакта в `packages/`).

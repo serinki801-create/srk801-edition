@@ -1,0 +1,66 @@
+# ============================================================================
+# swift-ios-build.yml — Тир B: удалённая компиляция Swift на macOS-раннере.
+# Ручной запуск (workflow_dispatch): Inputs project_path (default
+# demo/HelloHybrid) и target (default arm64-apple-ios13.0).
+# Архитектура: Linux делает всё остальное (редакторы, git, ObjC, упаковка,
+# подпись, доставка), а Swift собирается здесь, где есть настоящий
+# swift-frontend от Apple. Используется ТОТ ЖЕ package_ipa.sh из проекта,
+# никакого параллельного билда.
+# ============================================================================
+name: swift-ios-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_path:
+        description: 'Путь к проекту внутри репозитория (там лежит package_ipa.sh)'
+        required: false
+        default: 'demo/HelloHybrid'
+        type: string
+      target:
+        description: 'Swift target triple (минимум iOS 13, рантайм системный)'
+        required: false
+        default: 'arm64-apple-ios13.0'
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Theos (git clone --recursive, Swift на iOS из коробки + Xcode раннера)
+        run: |
+          if [ ! -x "$HOME/theos/toolchain/linux/iphone/bin/clang" ] && [ ! -d "$HOME/theos" ]; then
+            git clone --recursive https://github.com/theos/theos "$HOME/theos"
+          fi
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: iPhoneOS.sdk (только если раннер его не даёт)
+        run: |
+          if ! ls "$HOME/theos/sdks/"*.sdk >/dev/null 2>&1; then
+            "$HOME/theos/bin/install-sdk" latest
+          fi
+          ls -d "$HOME"/theos/sdks/*.sdk
+
+      - name: Утилиты упаковки (dpkg для make package, ldid для ad-hoc)
+        run: |
+          brew install dpkg ldid || brew upgrade dpkg ldid
+
+      - name: Сборка тем же package_ipa.sh + verify_ipa.sh внутри
+        env:
+          IOS_DEPLOY_TARGET: ${{ inputs.target }}
+        run: |
+          cd "${{ inputs.project_path }}"
+          chmod +x package_ipa.sh verify_ipa.sh
+          ./package_ipa.sh
+          ls packages/*.ipa || { echo "IPA_MISSING: packages/*.ipa не появился"; exit 1; }
+
+      - name: Артефакт ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipa
+          path: ${{ inputs.project_path }}/packages/
+          if-no-files-found: error
