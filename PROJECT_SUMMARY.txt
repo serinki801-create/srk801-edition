@@ -1,0 +1,592 @@
+============================================================================
+ AI-OS x86_64 — Hobby Operating System Project Summary
+============================================================================
+
+PROJECT PATH
+--------------------------------------------------------------------------
+  /home/abzal/hobby-os
+
+
+WHAT THIS IS
+--------------------------------------------------------------------------
+  A 64-bit Long Mode hobby OS (x86_64) with:
+    - Multiboot2-compliant bootloader (spec-correct header, 80 bytes)
+    - Identity paging (4-level, 2 MB pages, first 512 MB + on-demand maps)
+    - GDT with kernel/user segments (0x08/0x10/0x1B/0x23) + TSS (0x28)
+    - IDT with 256 interrupt gates (incl. DPL=3 syscall gate 0x80)
+    - PIC remapped to vectors 0x20-0x2F
+    - CPU exception handlers with register dump + KERNEL PANIC
+    - PIT 100 Hz timer, PMM bitmap + kernel heap, cooperative scheduler
+    - VFS + TAR initrd, ELF64 loader, Ring 3 userland, int 0x80 syscalls
+    - Framebuffer graphics (VBE, double buffered) + 8x8 font
+    - NX/XD page protection, stack protector, user-pointer sanitizer
+    - macOS-style composite window manager (menu bar, dock, windows)
+    - PS/2 keyboard + mouse drivers, VGA text mode (80x25)
+    - Interactive shell: AI-OS> (20+ commands, incl. ls/cat/exec/gui/
+      desktop/secinfo) + Arch macOS-like distro build script
+
+
+STEP-BY-STEP SUMMARY
+--------------------------------------------------------------------------
+
+STEP 0 — Project Bootstrap
+  - Created /home/abzal/hobby-os
+  - Wrote boot.asm with Multiboot2 header
+  - Wrote kernel.c with VGA welcome screen
+  - Wrote linker.ld and Makefile
+  - Built kernel.elf (45 KB ELF64 statically linked)
+
+STEP 1 — Bootloader & Long Mode Transition
+  - boot.asm: Multiboot2 header, 32-bit protected mode entry
+  - A20 line enable (port 0x92)
+  - CPUID detection (leaf 0x80000001, Long Mode bit EDX[29])
+  - 4-level page tables: PML4 -> PDPT -> PDT (2 MB pages, identity map)
+  - CR3 = PML4 physical address, CR4.PAE=1, IA32_EFER.LME=1, CR0.PG=1
+  - Far jump to reload CS (64-bit code segment selector 0x08)
+  - Stack: 16 KB in .bss, aligned to 16 bytes
+
+STEP 2 — VGA & Kernel Infrastructure
+  - vga.c/vga.h: VGA text buffer at 0xB8000
+    * vga_init(), vga_clear(), vga_putchar(), vga_print()
+    * Cursor tracking, backspace, newline, scroll
+  - port.h: inb() / outb() via GCC inline asm (AT&T syntax)
+  - kernel.c: kmain() calls gdt_init(), idt_init(), keyboard_init(), vga_init()
+    * Shell loop: waits for Enter, parses command, prints prompt
+    * Commands: help, clear, echo <text>, info
+    * HLT loop for power saving between keystrokes
+
+STEP 3 — GDT (Global Descriptor Table)
+  - gdt.c/gdt.h: 40-byte GDT
+    * [0x00] Null descriptor (8 bytes)
+    * [0x08] 64-bit Code segment (L=1, G=1, exec/read)
+    * [0x10] 64-bit Data segment (read/write)
+    * [0x18] TSS descriptor (16 bytes, 64-bit available TSS)
+  - TSS structure: RSP0 = stack_top (kernel stack for ring 0)
+  - lgdt loads GDTR, ltr loads TSS selector (0x18)
+  - gdt_flush.asm (NASM): reloads DS/ES/FS/GS/SS, far jump to reload CS
+    * Far jump encoded as raw bytes (NASM 2.16 quirk in ELF64)
+
+STEP 4 — IDT & PIC
+  - idt.c/idt.h: 256-entry IDT (4096 bytes, 16-byte aligned)
+    * idt_set_entry(): builds 64-bit interrupt gate descriptor
+    * type_attr = 0x8E (P=1, DPL=00, Type=1110 interrupt gate)
+    * idt_load(): lidt instruction
+  - pic_remap(): ICW1-ICW4 for master (0x20/0x21) and slave (0xA0/0xA1)
+    * Master base vector: 0x20, Slave base vector: 0x28
+    * All IRQs masked initially (0xFF)
+  - pic_unmask_irq(1): opens keyboard IRQ on master PIC
+  - cli before setup, sti after setup
+  - idt_init() loops 0..255:
+    * Vectors 0x21 (keyboard): keyboard_irq_handler
+    * Vectors 0x20-0x27, 0x28-0x2F: default_irq_handler (EOI)
+    * Vectors 0-31, 48-255: default_exception_handler (HLT loop)
+
+STEP 5 — ISR Stubs (isr.asm)
+  - default_exception_handler: HLT infinite loop (CPU stops safely)
+  - default_irq_handler: saves RAX, sends EOI to master+slave PIC,
+    restores RAX, iretq
+
+STEP 6 — Keyboard Driver
+  - keyboard.c/keyboard.h: PS/2 scancode Set 1
+    * scancode_to_ascii[128]: make codes -> ASCII (lowercase)
+    * scancode_to_ascii_shift[128]: shift variants
+    * State: shift_pressed, caps_lock, input_buffer[256], input_len
+    * Special keys: Backspace (0x0E), Enter (0x1C), Space (0x39)
+    * keyboard_init(), keyboard_handle_scancode(), keyboard_get_input()
+    * keyboard_is_input_ready(), keyboard_clear_input()
+  - keyboard_isr.asm (NASM): assembly ISR for IRQ1
+    * Saves 15 GP registers, aligns stack to 16 bytes (ABI)
+    * in al, 0x60 -> mov dil, al -> call keyboard_handle_scancode
+    * out 0x20, 0x20 (EOI to master PIC)
+    * Restores registers, iretq
+    * .note.GNU-stack section to silence linker warning
+  - Compiled with -mno-sse -mno-sse2 (ISR cannot use XMM registers)
+
+STEP 7 — Shell & I/O Integration
+  - kernel.c shell loop:
+    * Prints "AI-OS> " prompt
+    * Waits for keyboard_is_input_ready() flag
+    * keyboard_get_input() copies buffer, keyboard_clear_input() resets
+    * handle_command(): help, clear, echo, info, unknown
+  - Custom cmd_eq() and cmd_starts_with() (no libc dependency)
+
+STEP 8 — Build System Fixes
+  - linker.ld: C-style // comments replaced with /* */
+  - NASM path: using Flatpak SDK NASM 2.16.03
+    /var/lib/flatpak/runtime/org.freedesktop.Sdk/x86_64/25.08/.../nasm
+  - NASM 2.16 quirk: far jump in ELF64 mode uses raw bytes:
+    db 0x48, 0xEA  ; REX.W + opcode
+    dw 0x08        ; selector
+    dd target      ; 32-bit absolute offset
+  - gdt_flush.asm, isr.asm, boot.asm, keyboard_isr.asm: .note.GNU-stack added
+  - Makefile:
+    * SRC_ASM includes all .asm files
+    * keyboard.o and vga.o compiled with -mno-sse -mno-sse2
+    * ISO target guarded with xorriso check
+    * run-kernel target: qemu-system-x86_64 -kernel kernel.elf
+
+
+PHASE 3 — Exceptions, Timer, Memory, Tasks (steps 9-13)
+--------------------------------------------------------------------------
+  WHY: превратить «голое» ядро в систему с диагностикой сбоев, временем,
+  памятью и многозадачностью. Без этого невозможны файлы, юзерленд и GUI.
+
+  STEP 9 — Boot paging 2 MB -> 512 MB + kernel_end + VGA hex helpers
+  - WHY: весь Phase 3-5 (куча 256 КБ, битмап PMM 32 КБ, стеки задач,
+    initrd-модуль, user-программы @0x400000, user-куча @16 МБ) не влез бы
+    в исходные 2 МБ identity-map.
+  - HOW: boot.asm в enable_long_mode циклом заполняет PDT: 256 записей
+    entry[i] = (i * 2MB) | Present | Writable | PS. linker.ld получил
+    символ kernel_end (всё ниже него PMM считает занятым). Исправлена
+    передача mb_info в RDI (mov edi вместо mov rdi — zero-extend 32 бит).
+  - vga.c/h: vga_print_hex8/32/64, vga_print_u64/dec для дампов и meminfo.
+
+  STEP 10 — Исключения CPU и Kernel Panic
+  - exceptions.asm (NASM): 32 стаба exc_stub_0..31. Векторы С кодом ошибки
+    CPU (8, 10-14, 17, 21, 29, 30) кладут только номер вектора, остальные —
+    сначала dummy error 0, потом вектор. Единый вид стека:
+    [vector][error][RIP][CS][RFLAGS]. exc_common сохраняет 15 GP-регистров
+    и зовёт C-обработчик.
+  - exceptions.c: имена #DE..#SX, дамп RAX..R15, RIP/CS/RFLAGS/RSP, CR2/CR3,
+    Error Code белым по красному, затем panic(). exceptions_init()
+    перекрывает векторы 0-31 поверх idt_init (cli/sti вокруг).
+  - panic.c/h: panic(msg) — красный баннер KERNEL PANIC, cli, вечный hlt.
+  - Shell: команда crash (деление на ноль -> #DE -> дамп -> panic).
+  - Сборка: exceptions.asm линкуется как exceptions_asm.o (иначе конфликт
+    имени с exceptions.c -> exceptions.o).
+
+  STEP 11 — Системный таймер PIT 8254 @ 100 Гц
+  - timer.c/h + timer_isr.asm: divisor = 1193180/100 = 11931, порты
+    0x43 (команда 0x36, канал 0, режим 3) / 0x40 (младший/старший байт).
+    IRQ0 -> вектор 0x20, pic_unmask_irq(0). Стаб сохраняет регистры,
+    зовёт timer_tick() (только g_ticks++), шлёт EOI в master PIC, iretq.
+  - API: timer_ticks(), uptime_ms() (тики*10 мс), sleep_ms() (hlt-цикл).
+  - Shell: команда uptime (секунды + мс + тики).
+  - timer.o компилируется с -mno-sse (контекст прерывания, XMM не
+    сохраняются в стабах — то же для keyboard/vga/exceptions/panic).
+
+  STEP 12 — PMM bitmap + kernel heap (first-fit)
+  - pmm.c/h: битмап 32 КБ на 1 ГБ (262144 фрейма по 4 КБ). pmm_init парсит
+    Multiboot2 tag 6 (mmap, type==1 — свободно), всё ниже kernel_end и
+    фрейм 0 резервирует. Без mmap — fallback 64 МБ. pmm_alloc_block (первый
+    свободный, пропуск 0), pmm_free_block, pmm_reserve_range (для initrd и
+    userland — добавлено в Phase 4), статистика total/free/blocks.
+  - kheap.c/h: статический пул 256 КБ, free-list first-fit: kmalloc с
+    выравниванием на 8 и сплитом блоков, kfree с коалесингом соседей,
+    валидация указателя (внутри пула + из цепочки + занят), cli/sti.
+  - Shell: meminfo (PMM total/free/blocks + heap total/used/free),
+    testmem (kmalloc 32/1024/5000, паттерн-тест, reuse-тест, PASS).
+
+  STEP 13 — Кооперативная многозадачность (Round-Robin)
+  - task.h: task_t, rsp ОБЯЗАТЕЛЬНО первое поле (offset 0 для switch.asm);
+    PID, state (EMPTY/READY/RUNNING), name[32], stack bounds, counter.
+  - process.c: пулы 8 задач и 8 стеков по 8 КБ (BSS). process_init (задача 0
+    = main), task_create(entry, name): строит стартовый стек
+    [task_exit][entry][r15..rbp] так, что первый RET прыгает в entry, а
+    возврат из entry ведёт в task_exit (вечный hlt).
+  - switch.asm: task_switch(old, new) — push rbp/rbx/r12-r15, [old]=rsp,
+    rsp=[new], pop, ret. Сохраняются только callee-saved — достаточно, т.к.
+    yield это обычный вызов (caller-saved компилятор считает убитыми).
+  - scheduler.c: scheduler_init (main + demo worker1/worker2 со счётчиками),
+    scheduler_yield (следующая READY/RUNNING по кругу, main-цикл зовёт её
+    каждую итерацию). Вытеснения по таймеру НЕТ осознанно: preempt внутри
+    IRQ требует отдельных стеков — кооперативная модель надёжна.
+  - Shell: tasks (PID/STATE/NAME/counter/rsp + число активных).
+
+
+PHASE 4 — Userland, VFS и графика (steps 14-20)
+--------------------------------------------------------------------------
+  WHY: перевести систему из «демо ядра» в архитектуру с пользовательским
+  пространством, файлами и графикой — база под Phase 5 (безопасность,
+  оконный менеджер).
+
+  STEP 14 — Multiboot2-заголовок по спеке (найден и исправлен баг)
+  - БЫЛО: arch=3 вместо 0, неверная длина, info-тег 20 байт (не кратен 8).
+    GRUB обходит теги шагом (size+7)&~7=24 и сбивался — заголовок фактически
+    был битым (ранний runtime не проверялся, QEMU тут нет).
+  - СТАЛО: magic/arch/length/checksum, len=80 (кратно 8, в первых 8 КБ):
+    info-request {4,6,8,2}, framebuffer 1024x768x32, module-align, END
+    (+4 паддинга внутри fb-тега, footprint 24). Проверено побайтово
+    питон-скриптом: сумма 0, обход [(1,24),(5,20),(6,8),(0,8)].
+
+  STEP 15 — GDT user-сегменты + IDT DPL-гейт
+  - gdt.c/h: классический порядок null/kcode(0x08)/kdata(0x10)/
+    ucode(0x18->0x1B, access 0xFA)/udata(0x20->0x23, access 0xF2)/
+    TSS(0x28, был 0x18!). GDT_SIZE 40 -> 56. gdt_set/get_tss_rsp0()
+    (переключение RSP0 на syscall-стек при exec). gdt_flush.asm: load_tss
+    обновлён на 0x28.
+  - idt.h/c: idt_set_entry_dpl(vec, addr, dpl), IDT_SYSCALL_VECTOR 0x80.
+
+  STEP 16 — VFS + Initrd TAR
+  - vfs.h/c: vfs_node_t {name, type, size, data, read/write/open/close/
+    readdir, next/child}, корень "/", vfs_add_child, vfs_open
+    ("/a" и "a", спуск на 1 уровень), vfs_read, vfs_dir_count,
+    vfs_create_memfile (узлы в kheap, данные in-place).
+  - initrd.c/h: парсер ustar (имя@0, octal-размер@124, typeflag@156,
+    пропуск каталогов/'5', срез "./" и "/", конец — нулевой блок, кап
+    64 файла), модуль ищется в Multiboot2 tag 3 (первый модуль, проверка
+    границ), его страницы резервируются в PMM. Без модуля — builtin
+    hello.txt/readme.txt (ls/cat работают и под qemu -kernel).
+
+  STEP 17 — Ring 3 и системные вызовы
+  - ABI int 0x80 (64-bit): EAX=номер, RDI/RSI/RDX=аргументы, RAX=возврат.
+    Номера: 0 print, 1 read (неблокирующее, из keyboard-буфера), 2 exit,
+    3 alloc. Обёртки — static inline в syscall.h (только для userland,
+    ядро собирается с -DKERNEL и их не видит).
+  - user.asm: syscall_int80_handler (сохраняет 15 регистров, достаёт
+    saved rax/rdi/rsi/rdx со стека по точным смещениям, зовёт диспетчер,
+    кладёт возврат в слот saved-rax, iretq), syscall_entry для LSTAR
+    (сохраняет user-RSP, переходит на syscall-стек 16 КБ, диспетчер,
+    sysretq raw-bytes 48 0F 07), switch_to_user_raw (сохраняет kernel
+    RSP/RBP, грузит DS/ES/FS/GS=0x23, куёт IRETQ-кадр SS/RSP/RFLAGS=0x202/
+    CS=0x1B/RIP на exec-стеке, iretq), user_exit_to_kernel (cli, restore
+    RSP, pop rbp, ret — возврат в точку вызова switch).
+  - syscall.c: диспетчер + sys_do_*; MSR STAR/LSTAR/FMASK + EFER.SCE
+    (с CPUID-проверкой 0x80000001:EDX[11]); TSS.RSP0 переключается на
+    syscall-стек на время exec и восстанавливается после; после возврата
+    сегменты перезагружаются на 0x10. Вход в Ring 3 — через IRETQ (без
+    ограничений STAR-раскладки), int 0x80 — основной ABI, SYSCALL-путь
+    запрограммирован и ведёт в тот же диспетчер.
+  - 64-битный нюанс: TSS в Long Mode не имеет полей SS — обработчики
+    прерываний из Ring 3 работают с SS=0x23, это легально при CPL=0.
+
+  STEP 18 — ELF64-загрузчик
+  - elf.c/h: проверка магии/class/LE/x86-64/ET_EXEC-or-DYN, кап 16 phdr,
+    предвалидация ВСЕХ PT_LOAD до копирования: vaddr в [0x400000, 512MB),
+    вне [0x100000, kernel_end), offset+filesz внутри файла. Копирование
+    filesz + обнуление BSS-хвоста (memsz). Возвращает entry (проверен
+    диапазоном). user_prog линкуется на 0x400000 (user/user.ld, ET_EXEC).
+
+  STEP 19 — Framebuffer и графика
+  - framebuffer.c/h: парсинг MB2 tag 8 (только packed RGB type==1,
+    bpp 16/24/32, кап 4096x4096). Если буфер выше identity-map (адреса QEMU
+    ~0xE0000000) — fb_map_range() домэппивает 2-МБ страницами через свою
+    PDT в BSS: PDPT находится через CR3->PML4[0] (без правок boot.asm),
+    затем reload CR3 (сброс TLB).
+  - Рисование в back-буфер 3 МБ (1024x768x32, NOBITS): put_pixel (32/24/BGR,
+    16/RGB565), fill_rect, draw_char/draw_string шрифтом 8x8
+    (font.h: 96 глифов 0x20-0x7F, MSB = левый пиксель), fb_flip() построчно
+    с учётом pitch — двойная буферизация, ни одного тиаринга.
+  - Без тега (qemu -kernel, текстовый VGA): fb_available()==0, gui/desktop
+    честно сообщают об этом.
+
+  STEP 20 — Userland-программа, initrd-образ, GRUB, shell
+  - user/user_prog.c: freestanding без libc, main() тестирует sys_alloc +
+    паттерн, опрашивает sys_read, sys_exit(42). user_start.asm: _start ->
+    call main -> sys_exit(rax). user.ld: ENTRY _start, база 0x400000,
+    /DISCARD/ для note/eh_frame. user_prog.elf: ET_EXEC x86-64, PT_LOAD на
+    0x400000/0x401000 (проверено readelf).
+  - Makefile: USER_CFLAGS/USER_LDFLAGS, цели userprog/initrd, initrd.img
+    собирается tar --format=ustar (hello.txt, readme.txt, user_prog.elf),
+    ISO кладёт kernel.elf + initrd.img, grub.cfg: gfxmode 1024x768x32,
+    gfxpayload=keep, module2 /boot/initrd.img. run-цели с -vga std
+    (важно для framebuffer), run-module для -kernel + -initrd без ISO.
+  - kernel.c: init-порядок vga,gdt,idt,exceptions,timer,pmm,kheap,scheduler,
+    keyboard,vfs,initrd,syscall,fb. Команды ls (с числом TAR-файлов),
+    cat <file> (кап 8 КБ + [truncated]), exec <prog> (elf_load ->
+    switch_to_user_mode на 16-КБ user-стеке в BSS -> код выхода),
+    gui (демо: фон, окно, палитра, живые часы, эхо ввода, выход по
+    exit/ESC; после выхода текстовая консоль невидима до ребута —
+    на FB остаётся предупреждение).
+
+
+PHASE 5 — Безопасность, macOS-стол, Arch-дистрибутив (steps 21-25)
+--------------------------------------------------------------------------
+  WHY: закрыть дыры, найденные аудитом Phase 4; дать графике оконный
+  менеджер вместо статичной картинки; упаковать «macOS-опыт» для хоста
+  (Arch ISO + Docker-OSX) — и честно зафиксировать, где проходит граница
+  между темой оформления и настоящим macOS/Xcode.
+
+  STEP 21 — Аудит безопасности и защита памяти (security.c/h)
+  - НАЙДЕННЫЕ ДЫРЫ И ФИКСЫ:
+    a) sys_alloc раздавал блоки KHEAP с inline-заголовками free-list в
+       Ring 3: пользователь мог подделать заголовки и через kfree получить
+       произвольную запись в памяти ядра. ФИКС: отдельная user-куча 1 МБ
+       @16 МБ (вне ядра, внутри user-области, страницы NX, свой free-list
+       first-fit в syscall.c, резерв в PMM). kheap ядра недосягаем.
+    b) keyboard_get_input: underflow max_len-1 при max_len==0 (+NULL).
+       ФИКС: гард в начале функции.
+    c) sys_print/sys_read читали/писали по указателям Ring 3 без проверки
+       (чтение/запись памяти ядра). ФИКС: security_check_user_ptr() —
+       разрешены только [0x400000,512M) и окно текущего user-стека
+       (ставится/сбрасывается в switch_to_user_mode); проверки NULL,
+       переполнения addr+len, капа длины 1 МБ; отказ = лог [security]
+       + возврат 0 (fail-closed).
+    d) Весь код/данные исполняемы (2-МБ страницы без NX). ФИКС: EFER.NXE +
+       сплит PDT[0..2] (0-6 МБ) в 4-КБ PT (3 статические таблицы в BSS):
+       исполняем только [text_start, text_end) (символы добавлены в
+       linker.ld), стеки/куча/BSS/низкая память — NX. Остальные 2-МБ
+       страницы (6-512 МБ) помечены NX целиком; elf_load снимает NX
+       постранично через security_set_exec() (4 запасные PT под on-demand
+       сплит выше 6 МБ, отказ при исчерпании). Фреймбуфер мэппится с NX.
+    e) Нет канареек стека (был -fno-stack-protector). ФИКС: Makefile
+       переведён на -fstack-protector-strong (ядро и userland);
+       рантайм свой (libc нет): security.c (__stack_chk_guard константа +
+       __stack_chk_fail с красным баннером и halt), user/user_protect.c
+       (fail -> sys_exit(134)). Ограничение задокументировано: без ASLR
+       ключ фиксирован, ловит линейные переполнения.
+  - Shell: secinfo (canary, политика NX, санитайзер, user heap, DPL=3/TSS).
+  - security.o собирается с -mno-sse (вызовы из контекста прерываний).
+
+  STEP 22 — Оконный менеджер в стиле macOS (wm.c/h, desktop.c, mouse.c/h)
+  - WHY: gui из Phase 4 — статичная картинка; нужен композитный WM:
+    несколько окон, фокус, перемещение, Dock с действиями.
+  - mouse.c/h + mouse_isr.asm: PS/2 мышь с нуля — init с таймаутами
+    (fail-soft: без мыши всё остальное работает), AUX enable (0xA8),
+    compaq status (IRQ12+clock), команды 0xF6/0xF4 с ожиданием ACK,
+    IRQ12 -> 0x2C, 3-байтные пакеты с ресинхронизацией по биту 3, EOI в
+    slave+master PIC. API: mouse_x/y/buttons/present (кламп 1024x768).
+  - wm.c/h: retained-модель (текст окон хранится, растр — при композите),
+    z-order (фокусное рисуется последним), окна с тенью/рамкой/title bar/
+    светофорами, градиентный десктоп, верхняя панель (лого, имя активного
+    app, часы, WiFi, батарея), Dock из 5 иконок с эффектом выделения
+    (выбранная больше + точка-индикатор), курсор-стрелка. Круги/скругления
+    целочисленным isqrt (без libm). Кадр: desktop -> окна -> bar -> dock ->
+    cursor -> fb_flip() (двойная буферизация, разрывов нет; темп — по
+    событиям + раз в секунду на часы, темп ограничен PIT-тиками).
+  - desktop.c: desktop_init() (no-op без FB, зовётся из kernel_main),
+    desktop_run(): окна Terminal/Sysinfo/Finder, Dock-действия (Finder/
+    Term/Sys — открыть/сфокусировать, Exec — elf_load + Ring 3 прямо со
+    стола, Trash — закрыть всё). Ввод: мышь (фокус кликом, drag за title
+    bar с захватом смещения, клик по Dock выбирает) + клавиатура (Tab —
+    фокус, WASD/QEZC — двигать окно: PS/2-стрелки драйвер отбрасывает,
+    поэтому WASD; 1-5+Enter — Dock, пустой Enter — запуск, ESC/exit —
+    выход). Shell: команда desktop.
+  - Найденный баг при разработке: drag-логика со static-смещением внутри
+    ветки — переписана на явные g_drag_off_x/y (захват при клике).
+
+  STEP 23 — Arch-дистрибутив и Docker-OSX (arch_macos_build.sh)
+  - ЧЕСТНАЯ РАМКА (в шапке скрипта): тема WhiteSur НЕ делает из Linux
+    macOS и НЕ даёт Xcode; Xcode работает только в macOS (Mac или VM).
+  - Часть Arch (только на Arch Linux, проверка /etc/arch-release): archiso
+    из профиля releng, пакеты KDE Plasma (X11 — Plank не работает под
+    Wayland) + SDDM + Plank + Docker, SDDM-автологин, Plank в автозапуске,
+    apply-macos-look.sh для live-сессии (paru -> whitesur-gtk/icon/cursors,
+    kwriteconfig, обои; Global Menu добавляется виджетом вручную —
+    одной строкой в выводе скрипта).
+  - Часть Docker-OSX (любой дистрибутив с docker+KVM): проверка /dev/kvm,
+    установка docker, генерация ~/run-macosx.sh (sickcodes/docker-osx,
+    --device /dev/kvm, 8G/4CPU, уникальный серийник): внутри — Apple ID ->
+    App Store -> Xcode -> Product/Archive -> .ipa (нужен Apple Developer
+    аккаунт). EULA-замечание: виртуализация macOS лицензирована только на
+    железе Apple. Альтернатива без Мака: EAS Build / Codemagic.
+  - Проверяется тестами через bash -n.
+
+  STEP 25 — Хост-тулчейн iOS: setup_host.sh, run_xcode_container.sh,
+              IPA_BUILD_GUIDE.md
+  - WHY: пользователю нужен конвейер «Arch Linux -> Xcode -> .ipa».
+    Факты сверены с официальным README Docker-OSX, а не выдуманы.
+  - setup_host.sh (только Arch): проверка vmx/svm в /proc/cpuinfo, modprobe
+    kvm_intel/kvm_amd, /dev/kvm, ignore_msrs=1; pacman: docker, qemu-desktop,
+    libvirt, virt-manager, dnsmasq, bridge-utils, edk2-ovmf, xorriso, git,
+    openssh, rsync; usermod в docker/libvirt/kvm; enable --now
+    docker.service + libvirtd.service. Опция --theme: KDE + WhiteSur-gtk-theme
+    и     WhiteSur-icon-theme ИЗ ИСХОДНИКОВ (git clone --depth=1 + ./install.sh,
+    имена репозиториев сверены с GitHub), иконки через kwriteconfig5,
+    Plank в автозапуск, остальное (обои/Global Menu/тема Plank) — печатные
+    шаги (их нельзя надёжно автоматизировать).
+  - run_xcode_container.sh: образ sickcodes/docker-osx:latest +
+    SHORTNAME=monterey (тега :auto под Monterey нет — :auto это Catalina;
+    взят документированный путь), CPU='Haswell-noTSX' + CPUID_FLAGS
+    (безопасно для Intel 4-5 поколения), RAM=80% MemTotal (мин. 4G),
+    SMP/CORES=nproc, GENERATE_UNIQUE + MASTER_PLIST_URL, headless по
+    умолчанию (без X11/DISPLAY), --gui только для разовой установки.
+    Подкоманды: start/stop/logs/status/ssh/sync/build/export-template.
+    Проекты едут через rsync по SSH (штатный механизм Docker-OSX —
+    в README это sshfs-принцип, прямой virtfs не проброшен), .ipa
+    забирается назад в ~/ios_projects/build/ipa-<дата>/.
+    Headless-сборка: xcodebuild archive + -exportArchive по SSH.
+  - IPA_BUILD_GUIDE.md, разделы 0-8: железо/Apple ID/Developer, установка macOS
+    (Disk Utility -> стереть большой диск), Apple ID + Xcode (App Store),
+    Remote Login + ssh-copy-id, automatic signing, первая GUI-сборка,
+    headless-команда, таблица method (app-store/ad-hoc/enterprise/
+    development), ручная подпись, траблшутинг. Ключевое ограничение:
+    Monterey тянет Xcode максимум 14.x (SDK до iOS 16); новее — Ventura/
+    Sonoma (тяжелее для Intel 4-5 gen).
+  - Тесты: tools_check_phase5.py расширен (bash -n обоих скриптов +
+    наличие гайда).
+
+  STEP 26 — Нативный iOS-тулчейн без VM/Docker: setup_macos_ui.sh,
+              setup_ios_toolchain.sh, Способ B в IPA_BUILD_GUIDE.md
+  - WHY: собирать .ipa прямо на Arch (ASUS X555L: 4 ГБ RAM — XFCE, а не KDE),
+    без виртуалок. Все спорные факты сверены с первоисточниками
+    (theos.dev, cctools-port README/issues, apple-codesign docs, AUR).
+  - setup_macos_ui.sh: xfce4 + lightdm + plank + capitaine-cursors +
+    appmenu-gtk-module + git/sassc/glib2; WhiteSur-gtk/icon ИЗ ИСХОДНИКОВ
+    (vinceliuice, --depth=1 + ./install.sh); применение через xfconf
+    (тема/иконки/курсор/xfwm/обои, с гардом на отсутствие X-сессии);
+    Plank в автозапуск; --dm включает lightdm (по умолчанию DM не трогаем).
+    Ручными оставлены только 3 клика компоновки панелей.
+  - setup_ios_toolchain.sh (НЕ от root — требует install-theos):
+    зависимости (clang/llvm/lld, cmake, rust, autoconf-набор, ncurses);
+    host-Swift только из AUR (swift-bin через paru — в extra его НЕТ,
+    best-effort); шим update-alternatives (install-theos зовёт его всегда,
+    в Arch команды нет — без шима exit 10); THEOS+PATH в ~/.bashrc;
+    официальный install-theos с ответом 'y' (Swift-toolchain kabiroberai +
+    SDK через install-sdk latest); линковщик из тулчейна, cctools-port
+    (--target=arm-apple-darwin + -arch arm64, как в issue #3/#6) ТОЛЬКО
+    fallback'ом; cargo install apple-codesign -> rcodesign (голый вызов =
+    ad-hoc подпись, --p12-file = настоящая — сверено с доками).
+    Генерирует ~/ios_projects/HelloHybrid (main.m без ARC/MRR-специфики,
+    SwiftLogic.swift с public/@objcMembers, -Bridging-Header.h, Info.plist,
+    control, Theos-Makefile iphone:clang:latest:14.0 + SWIFT_FILES по
+    детекту swiftc, package_ipa.sh: Payload + подпись + zip).
+    Smoke test: make package FINALPACKAGE=1 -> ретрай USE_SWIFT=0 ->
+    fallback-упаковка; печатает итоговый путь .ipa.
+  - Гайд, Способ B: установка, структура проекта, команда сборки, подпись
+    (CERT_P12/CERT_PASS), куда ставится такой .ipa (jailbreak/AltStore —
+    да, App Store — нет, туда только Способ A).
+  - Честные границы: Swift→iOS собирается при Swift-тулчейне, иначе
+    авто-fallback в ObjC; ldid не ставим (AUR-only, покрыт rcodesign).
+
+  STEP 27 — Мега-стек X555L: full_macos_setup.sh (визуал + Lite XL + железо)
+  - WHY: один скрипт превращает чистый Arch на Haswell/Broadwell-ноутбуке
+    в быстрый macOS-клон с нативным сборщиком .ipa. Все API сверены:
+    пакеты lite-xl/zram-generator в extra, auto-cpufreq только в AUR,
+    Latte-Dock мёртв (док = Plank), Lite XL API из официальных доков
+    (core.reload_module colors.*, keymap.add, command.add,
+    lspconfig.*.setup(), lsp.add_server{name,language,file_patterns}).
+  - Блок 1 (визуал, DE=xfce|kde): WhiteSur GTK/icons из исходников,
+    capitaine-cursors, Inter (SF Pro — только вручную с Apple ID,
+    скрипт подхватит *.otf из ~/SF-Pro); XFCE: picom (kawase-blur/тени —
+    xfwm4 blur не умеет), Plank-автозапуск, Kvantum для Qt-приложений;
+    KDE: KWin blur через kwinrc + reconfigure, Global Menu — виджетом
+    вручную. Курсор/темы — гарды на отсутствие имён.
+  - Браузер: Safari под Linux НЕ СУЩЕСТВУЕТ — ставится Firefox (+ru-словарь)
+    как самый лёгкий из пары: policies.json (процессы=4 под 4 ГБ RAM,
+    телеметрия off, userCSS разрешён), Safari-like userChrome.css
+    (круглая адресная строка) с одноразовым переносом в реальный профиль,
+    default-web-browser. Бюджет 30-60 МБ — только IDE, браузер ест 500+ МБ.
+  - Блок 2 (IDE): Lite XL из extra (C/Lua, idle ~15-30 МБ; QtCreator
+    отклонён — 200+ МБ, вне бюджета): lsp-плагин из verified-репо
+    (проверка init.lua), clangd дефолтом + sourcekit-lsp вручную
+    (%.swift; ObjC %.m/%.mm явно за clangd), симлинк sourcekit-lsp из
+    тулчейна Theos; тема colors/xcode-dark.lua (ключи style.* по докам);
+    плагин ipa-build.lua (команда ipa:build + F7/Ctrl+B, process API под
+    pcall, fallback os.execute; каноника — терминал + make package).
+  - Блок 3 (железо): linux-zen (+headers, GRUB-regen/systemd-boot note);
+    zram-generator (zram-size=ram, zstd); TLP по умолчанию (AC=performance,
+    BAT=schedutil) + --autocpufreq ставит AUR auto-cpufreq и МАСКИТ tlp
+    (вместе конфликтуют!); BFQ через udev-правило + применение наживую;
+    disable cups/ModemManager, bluetooth только по --no-bt; графика —
+    modesetting (xf86-video-intel пропущен осознанно: заброшен, тиринг),
+    Mesa/Vulkan/VAAPI + vainfo-проверка.
+  - Блок 4 (тест): free -h, df -h, CPU/ядро, timed theos-сборка HelloHybrid
+    при наличии тулчейна (иначе — указатель на setup_ios_toolchain.sh).
+
+  STEP 24 — Сборка и автотесты
+  - Makefile: цель check -> python3 tools_check_phase5.py (43 проверки:
+    побайтовая валидация MB2-заголовка и обхода тегов; nm-символы защиты/
+    WM/мыши/text_start; grep-индикаторы DPL=3/NX/MSR/0x1B/0x23/протектора;
+    user_prog ET_EXEC/entry/PT_LOAD/static-no-dynamic; TAR-состав initrd;
+    bash -n скрипта). `make clean && make && make check`: 0 варнингов,
+    ALL CHECKS PASSED (предупреждение: readelf локализован — тест принимает
+    и русское «нет динамического», и английское сообщение).
+
+
+FILES CREATED / MODIFIED (итог Phase 3-5)
+--------------------------------------------------------------------------
+  Phase 3: exceptions.asm/.c/.h, panic.c/h, timer.c/h, timer_isr.asm,
+    pmm.c/h, kheap.c/h, task.h, process.c/h, scheduler.c/h, switch.asm,
+    + правки boot.asm (paging 512M, mov edi), linker.ld (kernel_end),
+    vga.c/h (hex/dec), Makefile, kernel.c (uptime/meminfo/testmem/tasks/
+    crash + фикс cmd_eq/starts_with: старые возвращали 1 при совпадении,
+    а shell сравнивал с ==0 — команды никогда не срабатывали).
+  Phase 4: vfs.c/h, initrd.c/h, syscall.c/h, user.asm, elf.c/h,
+    framebuffer.c/h, font.h, user/user_prog.c, user/user_start.asm,
+    user/user.ld, + правки gdt.c/h (0x1B/0x23, TSS 0x28), gdt_flush.asm,
+    idt.c/h (DPL-сеттер), boot.asm (MB2 header 80B + FB request),
+    pmm.c/h (reserve), framebuffer NX позже в Phase 5, grub.cfg (gfxmode,
+    module2), Makefile (userprog/initrd/run-цели, -DKERNEL, -vga std),
+    kernel.c (ls/cat/exec/gui).
+  Phase 5: security.c/h, mouse.c/h, mouse_isr.asm, wm.c/h, desktop.c/h,
+    user/user_protect.c, arch_macos_build.sh, tools_check_phase5.py,
+    + правки linker.ld (text_start/text_end), syscall.c (uheap @16M,
+    санитайзер, окно стека), elf.c (NX-грант), framebuffer.c (NX на FB),
+    keyboard.c (гард max_len), idt.h (pic_unmask_irq), Makefile
+    (-fstack-protector-strong, mouse.o/security.o -mno-sse, check),
+    kernel.c (security/mouse/desktop init, команды desktop/secinfo),
+    desktop drag-багфикс, wm drag-перепись.
+  Host tooling (Arch Linux, вне ядра): setup_host.sh, run_xcode_container.sh,
+    IPA_BUILD_GUIDE.md (STEP 25); setup_macos_ui.sh, setup_ios_toolchain.sh
+    (STEP 26, + ~/ios_projects/HelloHybrid генерируется скриптом на хосте);
+    full_macos_setup.sh (STEP 27); FULL_INSTRUCTIONS.txt (единая инструкция
+    от нуля до .ipa); tools_check_phase5.py расширен под них.
+
+
+BUILD ARTIFACTS
+--------------------------------------------------------------------------
+  /home/abzal/hobby-os/kernel.elf     (178 KB, ELF64 LSB executable)
+  /home/abzal/hobby-os/user_prog.elf  (17 KB, ET_EXEC x86-64 @0x400000)
+  /home/abzal/hobby-os/initrd.img     (30 KB, ustar TAR: hello.txt,
+                                       readme.txt, user_prog.elf)
+  /home/abzal/hobby-os/*.o            (object files, incl. exceptions_asm.o
+                                       — asm с тем же basename, что и .c)
+  /home/abzal/hobby-os/ai-os.iso      (0 байт-заглушка: xorriso отсутствует,
+                                       ISO собирается при наличии xorriso)
+
+
+HOW TO RUN
+--------------------------------------------------------------------------
+  Статические тесты без QEMU (работают здесь):
+    cd /home/abzal/hobby-os
+    make check          # 43 проверки — ALL CHECKS PASSED
+
+  Полная сборка с нуля:
+    make clean && make  # kernel.elf + user_prog.elf + initrd.img (+ISO)
+
+  На хосте с QEMU:
+    make run            # ISO (GRUB: gfxmode, initrd-модуль) + -vga std
+    make run-kernel     # только ядро (VFS=builtin, без framebuffer)
+    make run-module     # ядро + initrd как -initrd (если QEMU умеет)
+
+  Внутри AI-OS (AI-OS> ):
+    help, clear, echo, info, uptime, meminfo, testmem, tasks, crash,
+    ls, cat <file>, exec user_prog.elf, gui, desktop, secinfo
+
+  Arch-дистрибутив (только Arch Linux):
+    bash arch_macos_build.sh                # ISO + подготовка Docker-OSX
+    bash arch_macos_build.sh --docker-only  # только Docker-OSX часть
+
+  Хост Arch Linux (только Arch, обычным пользователем, НЕ root):
+    bash setup_host.sh [--theme] [--yes]    # KVM, docker/libvirt, WhiteSur
+    bash run_xcode_container.sh start [--gui]  # macOS Monterey в Docker
+    bash run_xcode_container.sh build ~/ios_projects/MyApp MyApp Release TEAMID
+                                            # headless .ipa по SSH
+    bash setup_macos_ui.sh [--dm] [--yes]   # XFCE + WhiteSur из исходников
+    bash setup_ios_toolchain.sh [--no-swift] [--yes]  # Theos+SDK+подпись,
+                                            # генерация и сборка HelloHybrid
+    bash full_macos_setup.sh [--de=xfce|kde] [--dm] [--autocpufreq] [--no-bt] [--yes]
+                                            # мега-стек X555L: визуал +
+                                            # Lite XL + железо + тест
+
+
+KNOWN LIMITATIONS / HONEST NOTES
+--------------------------------------------------------------------------
+  - QEMU/xorriso отсутствуют в этой песочнице: сборка и статические тесты
+    зелёные, рантайм не гонялся. Кандидаты на проверку при первом запуске:
+    drag мышью, часы desktop, sys_read из Ring 3, gui на реальном VBE.
+  - Рабочий ABI юзерленда — int 0x80. SYSCALL/SYSRET запрограммированы
+    (STAR/LSTAR/FMASK/SCE) и ведут в тот же диспетчер, но тестовый бинарник
+    ходит через 0x80 (надёжный путь; SYSRET-раскладка STAR под 0x1B/0x23
+    не даёт одновременно корректные CS и SS — поэтому вход через IRETQ).
+  - Stack canary фиксированный (без ASLR нечего рандомизировать) — ловит
+    линейные переполнения, не targeted-атаки. SMAP нет: Ring 3 видит всю
+    identity-mapped память чтением/записью напрямую; защита — санитайзер
+    указателей в syscalls + изолированная user-куча + NX.
+  - Кооперативный планировщик: вытеснения по таймеру нет (осознанно).
+  - После gui/desktop текстовая VGA-консоль невидима до ребута (видеорежим
+    остаётся графическим) — на FB остаётся предупреждение.
+  - user_prog.elf выше 6 МБ не тестировался (нужны spare-PT для NX-гранта,
+    всего 4); штатный адрес 0x400000 — в сплит-зоне, работает напрямую.
+  - Xcode/.ipa НЕ запускаются ни на AI-OS, ни на Linux: только macOS
+    (Mac или Docker-OSX на Apple-железе + Apple ID + Developer-аккаунт)
+    либо облачная сборка (EAS Build / Codemagic). WhiteSur/Plank — только
+    внешний вид.
+  - Хост-скрипты (setup_*, run_*, full_*) проверены только статически
+    (bash -n в make check): Arch-машины здесь нет, рантайм не гонялся.
+    Safari под Linux не существует — в full_macos_setup.sh ставится Firefox.
+    Нативный .ipa из Способа B ставится на jailbreak/AltStore, но НЕ в
+    App Store (туда только Xcode-archive, Способ A).
+
+============================================================================

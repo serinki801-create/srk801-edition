@@ -1,0 +1,160 @@
+AI-OS x86_64 — СТАТУС ПОД LINUX MINT 22.3 (Ubuntu x86_64)
+============================================================
+Дата: 03 окт 2026
+Машина: Linux Mint 22.3, TCG QEMU (KVM доступен через privileged cgroup),
+         cc/clang 13.3.0 / 18.1.3, NASM 2.16.03 (Flatpak SDK)
+
+РАБОТАЕТ / ПРОВЕРЕНО
+------------------------------------------------------------------------
+1. Ядро загружается: Multiboot2/GRUB -> 32-bit protected mode -> paging
+   -> Long mode. Исправлены boot/gdt_flush (REX.W ea -> retfq), security.c
+   (pdpt->pdt для NX-split), ISR стабы переименованны в .text.
+2. Kernel паник, triple fault, #GP, #UD при boot — больше НЕТ.
+   VGA output (баннер AI-OS, "boot: pmm total=..."). Таймер 100 Гц: 908 IRQ
+   за 20 сек с отсутствием исключений.
+3. Stack protector -fstack-protector-strong, NX/XD нарисован, user sanitizer
+   (DPL=3, TSS, ring3 изоляция) — всё активно (см. secinfo в shell).
+4. Встроенный мини-компилятор (minicc.c) выражений в shell:
+   команды cc / cxx / objc / swift / build / samples подымаются.
+5. Хост-демо ObjC+GNUstep+BlocksRuntime (tools/host_demo.m) — собирается
+   строго флагами из ТЗ: gnustep-config --objc-flags -fblocks ... -lobjc
+   -lBlocksRuntime. Вспомогательный шим tools/include/objc/blocks_runtime.h.
+6. Desктоп-пример glass-визуала: framebuffer.c (fb_fill_rect_alpha,
+   fb_glass_rect, fb_fill_round_rect), wm.c (Dock, menu bar, bounce,
+   magnification, lowfx), desktop.c (Terminal/Sysinfo/Finder окна).
+7. make / make check / make clean — всё проходит (ALL CHECKS PASSED).
+   initrd.img содержит user_prog.elf + samples/hello.* в TAR/ustar.
+
+НЕ ХВАТАЕТ / ЧТО НУЖНО СДЕЛАТЬ
+------------------------------------------------------------------------
+- NASM не установлен в PATH на чистой Mint: нужен sudo apt install nasm
+  (мы используем fallback на Flatpak SDK NASM — но только если он есть).
+- QEMU на KVM-accelerator падает без root/apt qemu-system-x86; сейчас
+  работает TCG (user-mode эмулятор), но это медленно (5-10 s на загрузку).
+  Установи: sudo apt install qemu-system-x86 xorriso (проверь в /dev/kvm).
+- ISO (ai-os.iso) собран с xorriso, который был вручную dpkg-sym ?
+  Чтобы автоматизировать: sudo apt install xorriso + qemu-system-x86.
+- Реальный .ipa (App Store) на Linux собрать нельзя без Apple Dev Center:
+  1) Mint (этот хост): Theos (https://github.com/theos/theos) + cctools-port
+     + rcodesign — собирает arm64 Mach-O и ad-hoc подписывает. AltStore
+     может установить на 7-дневный аккаунт.
+  2) Docker Mac (docker-osx, sickcodes/docker-osx) + Xcode — только на
+     Intel Haswell/Broadwell с включённым VT-x, нужен Apple ID, 50 ГБ.
+  3) Для публикации в App Store — xcodebuild + Transporter — только macOS.
+- Swift на чистом Mint: нет нативного swiftc (только Ubuntu-пакет swift,
+  который не язык). Реальный Swift берётся с swift.org (download Swift
+  toolchain for Ubuntu 22.04/24.04) и требует много зависимостей.
+- tools/host_demo.m использует OBJCFLAGS -fblocks -Itools/include
+  -I$(gcc --print-file-name=include): всё работает без sudo.
+- Нет SMP/выделения памяти по DTR в framebuffer: fb_flip копирует
+  построчно, на weak-железе 1024x768 32bpp может давать 30 FPS.
+  Для малого железа используй: wm_set_lowfx(1) (vk по команде fx).
+- Interface.ai для .ipa всё ещё за пределами Linux: Mint может пока
+  только собрать host-часть (setup_ios_toolchain.sh нужен Arch).
+
+КОМАНДЫ ДЛЯ ПРОВЕРКИ
+------------------------------------------------------------------------
+  cd /home/abzal/hobby-os
+  make clean && make              # kernel.elf, user_prog.elf, initrd.img, ai-os.iso
+  make check                      # статические тесты MB2/XML/ELF/TAR
+  bash build.sh --kernel          # сборка + check
+  bash build.sh --host            # ObjC/GNUstep demo + C/C++/ObjC сэмплы
+  bash build.sh --run             # kernel + host + QEMU smoke (TCG)
+
+ФАЙЛЫ ИЗМЕНЕНЫ В PHASE 6 (03 окт 2026)
+------------------------------------------------------------------------
+  Makefile             — NASM autodetect, minicc.c и samples в initrd
+  build.sh             — новый скрипт сборки (kernel/host/run)
+  boot.asm             — NASM EA farjump + собственный GDT (gdt32_ptr)
+  gdt_flush.asm        — push+retfq вместо do-not-exist xEA far jump
+  security.c           — pdt вместо pdpt для NX-split
+  framebuffer.c        — alpha/glass/round-rect helpers
+  wm.c / wm.h          — frosted glass Dock, menu bar, bounce, lowfx
+  desktop.c            — default windows, dock actions, lowfx toggle
+  kernel.c / minicc.c  — xi компиляторный пайплайн + commands:
+                          cc/cxx/objc/swift/build/samples/fx
+  isr.asm/exceptions.asm/keyboard_isr.asm/timer_isr.asm/mouse_isr.asm
+                       — section .text вместо .note.GNU-stack
+  tools/host_demo.m    — GNUstep Blocks demo
+  tools/host_demo.h?_  — убран
+  tools/include/objc/blocks_runtime.h — GNUstep header shim
+  samples/hello.c / hello.cpp / hello.m / hello.swift
+  samples/macos_visual.swift — мини-визуал в стиле macOS (glass+dock)
+  tools_check_phase5.py — валидация (+ phase-6 checks)
+
+ИСТОРИЯ
+------------------------------------------------------------------------
+  Phase 3-5 (см. PROJECT_SUMMARY.txt): полный hobby-OS x86_64
+  kernel, userland, VFS, framebuffer, macOS-style WM, security hardening.
+  Phase 6 (03 окт 2026, Linux Mint 22.3): сборка на реальном Mint,
+  исправление dead code/triple bug/pf NX, добавление embedded компиляции.
+
+============================================================
+Конец отчёта.
+
+ДОПОЛНЕНИЕ (ПИВОТ): mint_ios_setup.sh — СКРИПТ, НЕ ОС
+============================================================
+Свою ось мы не осилим — зафиксировано. Практический продукт:
+  bash mint_ios_setup.sh [--visual] [--toolchain] [--ide] [--all]
+                         [--yes] [--with-swift]
+Блоки:
+  --visual:    WhiteSur GTK+иконки из исходников, Plank-док, picom
+               (стекло/blur, конфиг без автозапуска), обои, курсоры.
+  --toolchain: clang, Theos installer + iPhoneOS.sdk, линковщик
+               (из тулчейна, иначе cctools-port), подпись ldid
+               (apt, иначе сборка ProcursusTeam/ldid), демо
+               ~/ios_projects/HelloHybrid (ObjC+Swift) -> .ipa,
+               упаковщик package_ipa.sh (CERT_P12/rcodesign либо ldid -S).
+  --ide:       Lite XL v2.1.8 portable (C/Lua, ~15-30 МБ, НЕ Electron),
+               clangd, LSP-плагин best-effort, тема xcode-dark,
+               плагин ipa-build (Ctrl+B); fallback — Geany из apt.
+  --with-swift: host-Swift через официальный swiftly (swift.org),
+               по умолчанию ВЫКЛ (для .ipa не нужен).
+Драйвера: НЕ ТРОНУТЫ (нет TLP/cpufreq/grub/модулей в скрипте).
+Всё userspace + $HOME + gsettings; переживает reboot/upgrade; откат
+описан в финале скрипта. App Store .ipa — только Xcode/macOS.
+
+==============================================================
+Сессия 04.10.2026 — мини-ios addon (SPEC: визуал + Geany + мультиязычный тулчейн)
+==============================================================
+РЕШЕНИЕ: не "своя ОС", а дополнение Linux Mint (addon/).
+
+Тулчейн (OK):
+  ~/theos/toolchain/linux/iphone/ — clang 13 (apple-fork) + swiftc 5.8 + ldid/otool/vtool
+  (кабировей toolchain v2.3.0; host-часть ~/theos/toolchain/linux/host ОБЯЗАТЕЛЬНА)
+  ~/theos/toolchain/linux/iphone-llvm11.bak — резерв L1ghtmann (clang 11)
+  SDK: ~/theos/sdks/iPhoneOS16.5.sdk
+  ЭКСПЕРИМЕНТЫ: swiftc 5.8 хочет -sdk (не --sdk), -resource-dir $IOS_TC/lib/swift,
+  -Xcc -isysroot -Xcc $SDK; линковка Swift: -undefined dynamic_lookup
+  (5.8-рантайм в toolchain нет, резолвится рантаймом устройства).
+
+Сборка .ipa (все PASS, проверено ipabuild.py verify):
+  NativeApp (ObjC+Swift гибрид), HelloC, HelloCpp, HelloObjC, HelloSwift, HelloPy (MicroPython)
+  Универсальный вход: ~/ios_projects/package_ipa.sh
+  ipabuild.py: check|new|build|verify|micropython; detect: c/cpp/objc/swift/hybrid/python
+
+IDE: Geany 2.0 (dpkg -x в ~/.local/geany, без sudo; обёртка ~/.local/bin/geany)
+  F9 -> VTE: bash -c 'cd $(dirname %f) && $HOME/ios_projects/package_ipa.sh $PWD'
+  filedefs: .mm=ObjC++, .ipa. Подсветка C/ObjC/C++/Swift — из коробки.
+
+Визуал (эта машина = XFCE, не Cinnamon!):
+  - панель: уже вверху (1366x28+0+0); убран tasklist/launchers -> только меню+трей+часы
+    (~/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml)
+  - кнопки окон: m:close,minimize,maximize (xfwm4)
+  - GTK: ~/.config/gtk-3.0/settings.ini -> WhiteSur-Dark/WhiteSur/WhiteSur-cursors
+  - WhiteSur иконки: ~/.local/share/icons/WhiteSur* ; курсоры: ~/.icons/WhiteSur-cursors
+    (репо: vinceliuice/WhiteSur-*; старые ссылки Wh1teShark/WhiteSur-gapc — мёртвые)
+  - Plank: автозапуск ~/.config/autostart/plank.desktop, zoom 130%, тема WhiteSur-dark
+  - Cinnamon-версия SPEC: addon/visual/macos_setup.sh (Muffin, panels-enabled, button-layout)
+  - perf: addon/visual/perf_tune.sh fast|balance|pretty (balance применён)
+
+Окружение: THEOS/IOS_TC в ~/.bashrc + ~/.profile; PATH НЕ засоряем toolchain
+  (иначе host-gcc подхватит toolchain `as` и падает на --64 — это было!).
+  Обёртки ldid/otool/vtool в ~/.local/bin.
+
+BUG'и, пойманные в этой сессии:
+  1) cputype arm64 = 0x0100000C (ARM|ABI64), а не 0x01000007 (это x86_64!)
+  2) make CFLAGS=... через командную строку override'ит += из Makefile (микропайтон)
+  3) stale .o в micropython (make не трекит смену флагов) -> жёсткая чистка build-minimal
+  4) mpthreadport.c: APPLE-секция без <pthread.h> при THREAD=0 -> локальный патч
+  5) LDFLAGS_ARCH unix-порта: gcc-синтаксис -Wl,-Map= на Darwin ld -> -Wl,-dead_strip

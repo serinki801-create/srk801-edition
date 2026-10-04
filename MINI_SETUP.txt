@@ -1,0 +1,62 @@
+MINI-SETUP: Linux Mint 22.3 -> станция сборки .ipa
+============================================================
+Дата проверки: 03 окт 2026
+Скрипт: /home/abzal/hobby-os/mint_ios_setup.sh (исполняемый, bash -n = OK)
+
+ГОТОВ ЛИ К ИСПОЛЬЗОВАНИЮ? ДА.
+Прогон `bash mint_ios_setup.sh --all --yes` выполнен 03.10.2026,
+тестовый .ipa собран и проверен (unzip -l показывает Payload/App.app
+с Info.plist + Mach-O arm64 бинарником).
+
+ЧТО СТАВИТ СКРИПТ (флаги: --visual / --toolchain / --ide / --all)
+------------------------------------------------------------
+[visual]    Plank (док в стиле macOS, автостарт), Picom
+            (~/.config/picom.conf: backend="glx", vsync=true,
+            без flickering), gsettings-темы Cinnamon/XFCE
+            (рамки, курсоры; WhiteSur — опционально вручную).
+[toolchain] Theos в ~/theos (git clone --recursive),
+            iPhoneOS16.5.sdk в ~/theos/sdks/,
+            статический clang 11.1.0 (L1ghtmann iOSToolchain),
+            ldid (ad-hoc подпись, собран из исходников, т.к. в
+            репах Mint его нет), демо-проект
+            ~/ios_projects/HelloHybrid (UIViewController/UIView,
+            ObjC + Swift-фолбэк).
+[ide]       Lite XL v2.1.8 portable (C/Lua, ~20 МБ ОЗУ, БЕЗ
+            Electron/Chromium), тёмная тема xcode-dark,
+            плагин Ctrl+B -> запуск package_ipa.sh из редактора;
+            fallback — Geany из apt. LSP: clangd.
+
+КАК СОБРАТЬ .ipa (одна команда)
+------------------------------------------------------------
+  cd ~/ios_projects/HelloHybrid && ./package_ipa.sh
+Готовый файл: ~/ios_projects/HelloHybrid/packages/HelloHybrid_*.ipa
+Проверено:
+  HelloHybrid_20261003-141854.ipa (5760 байт, первая сборка)
+  HelloHybrid_20261003-142238.ipa (6239 байт, финал:
+      Payload/HelloHybrid.app/Info.plist (385),
+      Payload/HelloHybrid.app/HelloHybrid (68608, arm64))
+Установка .ipa: джейлбрейк (Filza/Sileo) или AltStore/Sideloadly
+с обычным Apple ID. App Store публикация НЕ поддерживается
+(нужен Xcode на macOS) — скрипт на это не претендует.
+
+БЕЗОПАСНОСТЬ / ОТКАТ
+------------------------------------------------------------
+Ядро, драйверы, firmware, GRUB — НЕ ТРОНУТЫ. Всё в $HOME,
+~/.config, ~/.local, ~/.bashrc. Перезагрузка не нужна.
+Откат:  bash mint_ios_setup.sh --uninstall
+Вернёт стандартный вид Mint (темы Mint-Y-Dark/Mint-Y/DMZ-White)
+и удалит theos, ios_projects, lite-xl-конфиги, picom.conf,
+plank-автостарт. Apt-пакеты (plank/picom/geany) остаются —
+удаляются вручную: sudo apt remove plank picom geany.
+
+ИЗВЕСТНЫЕ ОГРАНИЧЕНИЯ
+------------------------------------------------------------
+- Нужен sudo для apt (plank/picom/geany/clangd). Без sudo скрипт
+  пропускает системные пакеты с WARN и продолжает остальное.
+- Host-Swift НЕ ставится по умолчанию (нужен флаг --with-swift,
+  качает ~500+ МБ через swiftly с swift.org). Для .ipa не нужен:
+  iOS-Swift берётся из тулчейна Theos при ответе 'y'.
+- Первая сборка тянет ~400+ МБ (тулчейн + SDK), занимает 10-20 мин
+  на слабом железе; повторные прогоны быстрые (всё кэшируется).
+- .ipa подписан ad-hoc (ldid -S): ставится на джейл или через
+  AltStore/Sideloadly с переподписью, 7 дней на бесплатном Apple ID.

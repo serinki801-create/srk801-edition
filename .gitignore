@@ -1,0 +1,13 @@
+# Сборка ядра (пересобирается через make)
+*.o
+*.elf
+*.iso
+*.img
+iso_root/
+initrd_content/
+
+# Временные файлы
+*.log
+*.ppm
+*~
+.DS_Store
