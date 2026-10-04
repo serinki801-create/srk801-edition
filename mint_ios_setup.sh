@@ -115,7 +115,7 @@ EOF
 #   cd ~/ios_projects/HelloHybrid && ./package_ipa.sh
 set -euo pipefail
 APP_NAME="HelloHybrid"
-PROJ="$HOME/ios_projects/$APP_NAME"
+PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$PROJ/packages"
 mkdir -p "$OUT"
 cd "$PROJ"
