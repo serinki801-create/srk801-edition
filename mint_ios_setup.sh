@@ -71,42 +71,72 @@ SDK_CACHE="$HOME/.cache/srk801-sdk"
 # отказ продолжать с указанием, какую версию тянуть. Вызывается автоматически
 # перед любой Swift-сборкой (remote) и по флагу --doctor.
 swift_doctor() {
-    local fail=0 sdk tc_sf sdk_sw tc_sw resdir
-    sdk="$(ls -d "$THEOS"/sdks/*.sdk 2>/dev/null | head -1)"
-    if [[ -z "$sdk" ]]; then
-        echo "doctor FAIL: нет SDK в $THEOS/sdks (чинка: \$THEOS/bin/install-sdk latest)"; return 1
-    fi
-    tc_sf="$THEOS/toolchain/linux/iphone/bin/swift-frontend"
+    # Правило тира A: ПАРУЕМ ТУЛЧЕЙН → SDK, а не наоборот.
+    # Self-built swift-frontend из apple/swift не собираем (часы работы,
+    # ломается на каждом релизе Xcode) — пункты ниже решают бесплатно.
+    local tc_root tc_sf tc_ver sdk choice choice_sw cur_sw gh_state pair verdict
+    tc_root="$THEOS/toolchain/linux/iphone"
+    tc_sf="$tc_root/bin/swift-frontend"   # == <toolchain>/usr/bin/swift-frontend в нотации Theos-доков
     if [[ ! -x "$tc_sf" ]]; then
-        echo "doctor FAIL: нет swift-frontend в тулчейне Theos"; return 1
+        echo "тулчейн: $tc_root  swift ?"
+        echo "sdk:     -   swift-version ?"
+        echo "пара:    mismatch (нет swift-frontend в тулчейне)"
+        echo "gh:      нет"
+        echo "verdict: none"
+        echo "подсказка: доустанови тулчейн Theos (With Swift support) либо иди в тир B: gh auth login"
+        return 1
     fi
-    sdk_sw="$(grep -m1 -oE 'swiftlang-[0-9]+\.[0-9]+' "$sdk/usr/lib/swift/UIKit.swiftmodule/arm64-apple-ios.swiftinterface" 2>/dev/null | head -1)"
-    sdk_sw="${sdk_sw#swiftlang-}"
-    tc_sw="$("$tc_sf" --version 2>/dev/null | grep -m1 -oE 'Swift version [0-9]+\.[0-9]+' | awk '{print $3}')"
-    resdir="$THEOS/toolchain/linux/iphone/lib/swift"
-    echo "doctor: SDK=$(basename "$sdk") modules_swift=${sdk_sw:-?} toolchain_swift=${tc_sw:-?}"
-    if [[ -z "$sdk_sw" || -z "$tc_sw" ]]; then
-        echo "doctor FAIL: не смог прочитать версии (SDK='$sdk_sw' toolchain='$tc_sw')"; fail=1
-    elif [[ "$sdk_sw" != "$tc_sw" ]]; then
-        echo "doctor FAIL: версии НЕ совпадают (SDK модули Swift $sdk_sw vs тулчейн $tc_sw)."
-        echo "doctor FIX: тяни тулчейн под Swift $sdk_sw (релизы CRKatri/swift, theos discussion #615)"
-        echo "          либо SDK под Swift $tc_sw (xybp888/iOS-SDKs, зеркало theos/sdks)."
-        fail=1
+    tc_ver="$("$tc_sf" --version 2>/dev/null | grep -m1 -oE 'Swift version [0-9]+\.[0-9]+' | awk '{print $3}')"
+    echo "тулчейн: $tc_root  swift ${tc_ver:-?}"
+    # Перебор SDK от СТАРОГО к НОВОМУ, первый чья swift-версия <= версии тулчейна.
+    choice=""; choice_sw=""
+    for sdk in $(ls -d "$THEOS"/sdks/iPhoneOS*.sdk 2>/dev/null | sort -V); do
+        cur_sw="$(grep -m1 -oE 'Apple Swift version [0-9]+\.[0-9]+' \
+            $(find "$sdk" -name 'arm64-apple-ios.swiftinterface' 2>/dev/null | head -1) 2>/dev/null \
+            | grep -oE '[0-9]+\.[0-9]+$')"
+        [[ -z "$cur_sw" ]] && continue
+        if ver_le "$cur_sw" "$tc_ver"; then choice="$sdk"; choice_sw="$cur_sw"; break; fi
+    done
+    if [[ -z "$choice" ]]; then
+        # Ничего не подошло — показываем самый старый как мешающий.
+        sdk="$(ls -d "$THEOS"/sdks/iPhoneOS*.sdk 2>/dev/null | sort -V | head -1)"
+        if [[ -n "$sdk" ]]; then
+            cur_sw="$(grep -m1 -oE 'Apple Swift version [0-9]+\.[0-9]+' \
+                $(find "$sdk" -name 'arm64-apple-ios.swiftinterface' 2>/dev/null | head -1) 2>/dev/null \
+                | grep -oE '[0-9]+\.[0-9]+$')"
+            echo "sdk:     $(basename "$sdk")   swift-version ${cur_sw:-?}"
+            echo "пара:    mismatch (модули новее тулчейна: SDK Swift ${cur_sw:-?} > toolchain Swift $tc_ver)"
+        else
+            echo "sdk:     -   swift-version ?"
+            echo "пара:    mismatch (SDK нет вовсе)"
+        fi
+        echo "подсказка: тяни SDK эпохи тулчейна (для Swift $tc_ver — xybp888/iOS-SDKs iOS 14–15, зеркало theos/sdks),"
+        echo "           НЕ свежий iOS 26/27 SDK и НЕ пересобирай компилятор."
     else
-        echo "doctor OK: версии совпадают (Swift $tc_sw)"
+        echo "sdk:     $(basename "$choice")   swift-version $choice_sw"
+        # kabiroberai 5.3.2 + SDK эпохи iOS 14–15 — ВАЛИДНАЯ ПАРА, не баг.
+        echo "пара:    ok"
     fi
-    if [[ -d "$resdir/iphoneos" ]]; then
-        echo "doctor OK: resource-dir $resdir (есть iphoneos)"
-    else
-        echo "doctor FAIL: нет $resdir/iphoneos — без него конфликт модулей Dispatch (см. тир A)"; fail=1
-    fi
-    if have gh; then
-        if gh auth status >/dev/null 2>&1; then echo "doctor OK: gh авторизован (тир B доступен)";
-        else echo "doctor INFO: gh стоит, но не авторизован — для тира B: gh auth login"; fi
-    else
-        echo "doctor INFO: gh нет (тир B недоступен; ставится: sudo apt install gh + gh auth login)"
-    fi
-    return $fail
+    if have gh && gh auth status >/dev/null 2>&1; then gh_state="установлен/авторизован";
+    elif have gh; then gh_state="установлен, нет авторизации (gh auth login)";
+    else gh_state="нет"; fi
+    echo "gh:      $gh_state"
+    if [[ -n "$choice" ]]; then verdict="local";
+    elif [[ "$gh_state" == "установлен/авторизован" ]]; then verdict="remote";
+    else verdict="none"; fi
+    echo "verdict: $verdict"
+    [[ -n "$choice" ]] && return 0
+    return 1
+}
+
+# Сравнение версий major.minor: ver_le A B == 1 если A <= B.
+ver_le() {
+    local a1 a2 b1 b2
+    IFS=. read -r a1 a2 <<< "$1"; IFS=. read -r b1 b2 <<< "$2"
+    a1=${a1:-0}; a2=${a2:-0}; b1=${b1:-0}; b2=${b2:-0}
+    if (( a1 < b1 )); then return 0; fi
+    if (( a1 > b1 )); then return 1; fi
+    (( a2 <= b2 ))
 }
 
 # --- SDK CACHE (тир B) ------------------------------------------------------------
@@ -143,7 +173,9 @@ remote_swift_build() {
     have gh || { echo "ERROR: нет gh. Ставлю..." >&2; need_sudo gh || true; }
     have gh || { echo "ERROR: поставь gh (sudo apt install gh) и авторизуйся: gh auth login — https://github.com/settings/tokens" >&2; return 1; }
     gh auth status >/dev/null 2>&1 || { echo "ERROR: gh не авторизован. Выполни: gh auth login" >&2; return 1; }
-    swift_doctor || return 1
+    # doctor — для отчёта (какая пара/вердикт); тир B от локальной пары не зависит,
+    # поэтому здесь только показываем, не гейтим. Гейт — gh auth выше.
+    swift_doctor || log "[swift-remote] локальной пары нет — идём в тир B (это нормально)"
     ensure_sdk_cache || return 1
     cd "$SCRIPT_DIR" || return 1
     log "[swift-remote] запуск workflow (target=$target)..."
@@ -292,9 +324,13 @@ if [[ -n "${IOS_DEPLOY_TARGET:-}" ]]; then
 fi
 echo "[IPA] make package FINALPACKAGE=1 ..."
 if ! make package FINALPACKAGE=1 "${MAKE_EXTRA[@]}"; then
-    echo "[IPA] WARN: make package упал — пробую голый make + ldid-пакировщик..."
+    echo "[IPA] WARN: make package упал — пробую голый make (без переупаковки)..."
     make clean >/dev/null 2>&1 || true
-    make FINALPACKAGE=1 USE_SWIFT=0 "${MAKE_EXTRA[@]}"
+    make FINALPACKAGE=1 "${MAKE_EXTRA[@]}" || {
+        echo "[IPA] ERROR: сборка не взлетела. Если в логе 'module compiled with Swift X.Y' —" >&2
+        echo "[IPA] ERROR: неверная пара тулчейн/SDK, чинится НЕ фолбэком: bash mint_ios_setup.sh --doctor" >&2
+        exit 1
+    }
 fi
 BUNDLE="$(find .theos _ -type d -name "$APP_NAME.app" 2>/dev/null | head -1 || true)"
 if [[ -z "$BUNDLE" ]]; then
@@ -325,10 +361,16 @@ PEOF
     cat > "$PROJ_DIR/verify_ipa.sh" <<'VEOF'
 #!/usr/bin/env bash
 # ============================================================================
-# verify_ipa.sh — верификация .ipa БЕЗ устройства и БЕЗ Mac (8 пунктов).
-# Падает (exit 1) на ПЕРВОМ же провале с внятным сообщением, какой именно.
+# verify_ipa.sh — верификация .ipa БЕЗ устройства и БЕЗ Mac (пункты 0–9).
+# Падает (exit 1) на ПЕРВОМ же провале, не предупреждает.
 # Ставка: __swift5_typeref в секциях бинаря = Swift отработал по-настоящему,
 # а не было тихой подмены ObjC. Вызывать: ./verify_ipa.sh packages/*.ipa
+#
+# Инструменты: Apple otool (в тулчейне Theos; это LLVM-бэкенд — тот же парсер,
+# что у llvm-otool, которого в тулчейне нет как отдельного бинаря) и llvm-nm.
+# Без LIEF: его Python-API меняет имена атрибутов между релизами.
+# Зависимости: unzip, python3, otool|llvm-otool, llvm-nm|nm. Проверяются ниже
+# с названием пакета, а не bare «command not found».
 # ============================================================================
 set -uo pipefail
 
@@ -339,88 +381,102 @@ IPA="${1:-}"
 export THEOS="${THEOS:-$HOME/theos}"
 TC="$THEOS/toolchain/linux/iphone/bin"
 
-# Резолв llvm-инструментов: тулчейн Theos -> PATH -> xcrun (macOS-раннер).
-resolve_tool() {
-    if [[ -x "$TC/$1" ]]; then echo "$TC/$1"; return 0; fi
-    if command -v "$1" >/dev/null 2>&1; then echo "$1"; return 0; fi
-    if command -v xcrun >/dev/null 2>&1 && xcrun --find "$1" >/dev/null 2>&1; then
-        echo "xcrun $1"; return 0
-    fi
-    return 1
-}
-OBJDUMP="$(resolve_tool llvm-objdump)" || { echo "VERIFY FAIL #0: нет llvm-objdump (ни в тулчейне, ни в PATH, ни через xcrun)"; exit 1; }
-if command -v llvm-nm >/dev/null 2>&1 || [[ -x "$TC/llvm-nm" ]]; then
-    NM="$(resolve_tool llvm-nm)"; NM_M=""
-else
-    NM="nm -m"; NM_M="1"  # Darwin nm
-fi
+# --- явные зависимости (с названием пакета) ---
+command -v unzip >/dev/null 2>&1 || { echo "VERIFY FAIL #0: нет unzip (пакет: unzip)"; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "VERIFY FAIL #0: нет python3 (пакет: python3)"; exit 1; }
+if [[ -x "$TC/otool" ]]; then OTOOL="$TC/otool";
+elif command -v llvm-otool >/dev/null 2>&1; then OTOOL="llvm-otool";
+elif command -v otool >/dev/null 2>&1; then OTOOL="otool";
+else echo "VERIFY FAIL #0: нет otool/llvm-otool (пакет: theos toolchain, иначе cctools)"; exit 1; fi
+if [[ -x "$TC/llvm-nm" ]]; then NM="$TC/llvm-nm";
+elif command -v llvm-nm >/dev/null 2>&1; then NM="llvm-nm";
+elif [[ "$(uname)" == "Darwin" ]]; then NM="nm -m";
+else echo "VERIFY FAIL #0: нет llvm-nm (пакет: theos toolchain, иначе llvm)"; exit 1; fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-unzip -qo "$IPA" -d "$WORK" || { echo "VERIFY FAIL #0: $IPA не распаковывается (битый zip)"; exit 1; }
 
-BIN="$WORK/Payload/$APP_NAME.app/$APP_NAME"
-PLIST="$WORK/Payload/$APP_NAME.app/Info.plist"
-[[ -f "$BIN" ]] || { echo "VERIFY FAIL #0: нет бинаря Payload/$APP_NAME.app/$APP_NAME"; exit 1; }
-[[ -f "$PLIST" ]] || { echo "VERIFY FAIL #6: нет Info.plist в бандле"; exit 1; }
+# --- 0. Распаковка, единственный Payload/*.app, CFBundleExecutable ---
+unzip -qo "$IPA" -d "$WORK" || { echo "VERIFY FAIL #0: $IPA не распаковывается (битый zip)"; exit 1; }
+mapfile -t APPS < <(find "$WORK/Payload" -maxdepth 1 -mindepth 1 -type d -name "*.app")
+[[ "${#APPS[@]}" -eq 1 ]] || { echo "VERIFY FAIL #0: ожидался ровно один Payload/*.app, найдено: ${#APPS[@]}"; exit 1; }
+APPDIR="${APPS[0]}"
+EXE="$(APP="$APPDIR" python3 -c "import plistlib,os;print(plistlib.load(open(os.path.join(os.environ['APP'],'Info.plist'),'rb')).get('CFBundleExecutable',''))" 2>/dev/null)"
+[[ -n "$EXE" ]] || { echo "VERIFY FAIL #0: не прочли CFBundleExecutable через plistlib"; exit 1; }
+BIN="$APPDIR/$EXE"
+[[ -f "$BIN" ]] || { echo "VERIFY FAIL #0: нет бинаря $BIN"; exit 1; }
+echo "VERIFY OK #0: один Payload/*.app, executable=$EXE"
 
 # --- 1. Mach-O ARM64 MH_EXECUTE (не x86_64, не arm64e) ---
-HDR="$($OBJDUMP --macho --private-headers "$BIN" 2>/dev/null)"
-echo "$HDR" | grep -q "ARM64" || { echo "VERIFY FAIL #1: нет cpuType ARM64"; exit 1; }
-echo "$HDR" | grep -qiE "x86_64|arm64e" && { echo "VERIFY FAIL #1: бинарь не чистый ARM64 (x86_64/arm64e)"; exit 1; }
-echo "$HDR" | grep -q "EXECUTE" || { echo "VERIFY FAIL #1: нет fileType MH_EXECUTE"; exit 1; }
-echo "VERIFY OK #1: Mach-O 64-bit ARM64 MH_EXECUTE"
+# otool -h на thin-бинаре: строка Mach header (fat-заголовков у thin нет,
+# поэтому -f тут пуст — смотрим -h, это задокументировано, а не подгон).
+MH="$($OTOOL -h "$BIN" 2>/dev/null | grep -E "0xfeedfacf|0xcafebabe" | head -1)"
+echo "$MH" | grep -qw "16777228" || { echo "VERIFY FAIL #1: нет cputype ARM64 (16777228)"; exit 1; }
+echo "$MH" | grep -qw "16777223" && { echo "VERIFY FAIL #1: бинарь x86_64"; exit 1; }
+SUB="$(echo "$MH" | awk '{print $3}')"
+[[ "$SUB" == "0" ]] || { echo "VERIFY FAIL #1: cpusubtype=$SUB — это arm64e, нужен чистый arm64 (0)"; exit 1; }
+echo "$MH" | awk '{print $5}' | grep -qw "2" || { echo "VERIFY FAIL #1: нет filetype MH_EXECUTE (2)"; exit 1; }
+echo "VERIFY OK #1: Mach-O ARM64 (cpusubtype 0), MH_EXECUTE"
 
-# --- 2. Swift-секции: минимум __swift5_typeref и __swift5_reflstr ---
-SECTS="$($OBJDUMP --macho --section-headers "$BIN" 2>/dev/null | grep -oE '__swift5[a-z0-9_]*' | sort -u)"
-echo "$SECTS" | grep -q "__swift5_typeref" || { echo "VERIFY FAIL #2: нет __swift5_typeref — Swift НЕ компилировался"; exit 1; }
-echo "$SECTS" | grep -q "__swift5_reflstr" || { echo "VERIFY FAIL #2: нет __swift5_reflstr — Swift НЕ компилировался"; exit 1; }
+# --- 2. Swift-секции: typeref + reflstr + proto (все три, иначе FAIL) ---
+SECTS="$($OTOOL -l "$BIN" 2>/dev/null | grep -oE 'sectname __swift5[a-z0-9_]*' | awk '{print $2}' | sort -u)"
+echo "$SECTS" | grep -qx "__swift5_typeref" || { echo "VERIFY FAIL #2: нет __swift5_typeref — Swift НЕ компилировался"; exit 1; }
+echo "$SECTS" | grep -qx "__swift5_reflstr" || { echo "VERIFY FAIL #2: нет __swift5_reflstr — Swift НЕ компилировался"; exit 1; }
+echo "$SECTS" | grep -qx "__swift5_proto" || { echo "VERIFY FAIL #2: нет __swift5_proto — Swift НЕ компилировался"; exit 1; }
 echo "VERIFY OK #2: swift-секции: $(echo "$SECTS" | tr '\n' ' ')"
 
-# --- 3. dylib: libswiftCore + UIKit ---
-DYLIBS="$($OBJDUMP --macho --private-headers "$BIN" 2>/dev/null | grep -oE 'name /[^ ]+\.dylib|name /System/Library/Frameworks/[^ ]+' | sort -u)"
-echo "$DYLIBS" | grep -q "/usr/lib/swift/libswiftCore.dylib" || { echo "VERIFY FAIL #3: нет LC_LOAD_DYLIB /usr/lib/swift/libswiftCore.dylib"; exit 1; }
-echo "$DYLIBS" | grep -q "UIKit.framework/UIKit" || { echo "VERIFY FAIL #3: нет LC_LOAD_DYLIB UIKit.framework/UIKit"; exit 1; }
-echo "VERIFY OK #3: dylib на месте (libswiftCore + UIKit)"
+# --- 3. ObjC-секции связки ---
+OBJSECTS="$($OTOOL -l "$BIN" 2>/dev/null | grep -oE 'sectname __objc_[a-z_]+' | awk '{print $2}' | sort -u)"
+[[ -n "$OBJSECTS" ]] || { echo "VERIFY FAIL #3: нет __objc_* секций — ObjC-сторона связки отсутствует"; exit 1; }
+echo "VERIFY OK #3: objc-секции: $(echo "$OBJSECTS" | tr '\n' ' ')"
 
-# --- 4. Рантайм НЕ вшит (см. A4: с 12.2 он в самой ОС) ---
-[[ -d "$WORK/Payload/$APP_NAME.app/Frameworks" ]] && { echo "VERIFY FAIL #4: бандл содержит Frameworks — рантайм вшит, запрещено"; exit 1; }
-echo "VERIFY OK #4: Frameworks/ нет — рантайм системный"
+# --- 4. Системные зависимости: libswiftCore + UIKit ---
+DYLIBS="$($OTOOL -L "$BIN" 2>/dev/null | grep -oE '/[^ ]+' | sort -u)"
+echo "$DYLIBS" | grep -qx "/usr/lib/swift/libswiftCore.dylib" || { echo "VERIFY FAIL #4: нет /usr/lib/swift/libswiftCore.dylib"; exit 1; }
+echo "$DYLIBS" | grep -qx "/System/Library/Frameworks/UIKit.framework/UIKit" || { echo "VERIFY FAIL #4: нет UIKit.framework"; exit 1; }
+echo "VERIFY OK #4: dylib на месте (libswiftCore + UIKit)"
 
-# --- 5. Подпись на месте (после ldid -S) ---
-echo "$HDR" | grep -q "LC_CODE_SIGNATURE" || { echo "VERIFY FAIL #5: нет LC_CODE_SIGNATURE — бинарь не подписан"; exit 1; }
-echo "VERIFY OK #5: LC_CODE_SIGNATURE present"
+# --- 5. Рантайм НЕ вшит ---
+[[ -d "$APPDIR/Frameworks" ]] && { echo "VERIFY FAIL #5: бандл содержит Frameworks — рантайм вшит, запрещено"; exit 1; }
+echo "VERIFY OK #5: Frameworks/ нет — рантайм системный"
 
-# --- 6. Info.plist: executable, deployment, identifier ---
-PLIST_OK="$(APP_NAME="$APP_NAME" python3 - "$PLIST" <<'EOF'
-import os, plistlib, sys
-want = os.environ.get('APP_NAME', '')
-p = plistlib.load(open(sys.argv[1], 'rb'))
-exe = p.get('CFBundleExecutable', '')
-bid = p.get('CFBundleIdentifier', '')
-mos = str(p.get('MinimumOSVersion', '99'))
-try:
-    ok = (exe == want
-          and len(bid) > 0
-          and tuple(int(x) for x in mos.split('.')) <= (13, 0))
-except Exception:
-    ok = False
-print('PLIST_OK' if ok else f'PLIST_BAD exe={exe!r} want={want!r} bid={bid!r} mos={mos!r}')
-EOF
-)"
-# Имя бинаря обязано совпадать с APP_NAME (а не захардкоженным литералом).
-[[ "$PLIST_OK" == PLIST_OK ]] || { echo "VERIFY FAIL #6: Info.plist невалиден ($PLIST_OK)"; exit 1; }
-echo "VERIFY OK #6: Info.plist (executable/bundle-id/min-os) корректен"
+# --- 6. Подпись жива (после ldid -S) ---
+$OTOOL -l "$BIN" 2>/dev/null | grep -q "cmd LC_CODE_SIGNATURE" || { echo "VERIFY FAIL #6: нет LC_CODE_SIGNATURE — бинарь не подписан"; exit 1; }
+echo "VERIFY OK #6: LC_CODE_SIGNATURE present"
 
-# --- 7. ObjC-часть на месте ---
-if [[ -n "$NM_M" ]]; then NOBJ="$($NM "$BIN" 2>/dev/null | grep -c '_OBJC_CLASS_\$_')"; else NOBJ="$($NM "$BIN" 2>/dev/null | grep -c '_OBJC_CLASS_\$_')"; fi
+# --- 7. ObjC-классы в бинаре ---
+NOBJ="$($NM "$BIN" 2>/dev/null | grep -c '_OBJC_CLASS_\$_')"
 [[ "$NOBJ" -gt 0 ]] || { echo "VERIFY FAIL #7: нет _OBJC_CLASS_\$_ — ObjC-часть отсутствует"; exit 1; }
 echo "VERIFY OK #7: ObjC-классов в бинаре: $NOBJ"
 
-# --- 8. Сводка: размер, секции, dylib, хэш ---
-SIZE="$(stat -c%s "$BIN" 2>/dev/null || stat -f%z "$BIN")"
-SHA="$(sha256sum "$IPA" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$IPA" | cut -d' ' -f1)"
-echo "VERIFY OK #8: summary size=${SIZE}B swift_sections=[$(echo "$SECTS" | tr '\n' ',' | sed 's/,$//')] dylibs=$(echo "$DYLIBS" | wc -l) sha256=$SHA"
+# --- 8. Info.plist: identifier, min-os, executable ---
+PLIST_OK="$(APP="$APPDIR" python3 - <<'EOF'
+import plistlib, os
+d = os.environ['APP']
+try:
+    p = plistlib.load(open(os.path.join(d, 'Info.plist'), 'rb'))
+    exe = p.get('CFBundleExecutable', '')
+    bid = p.get('CFBundleIdentifier', '')
+    mos = str(p.get('MinimumOSVersion', '99'))
+    real = os.path.basename(d).replace('.app', '')
+    ok = (len(bid) > 0
+          and tuple(int(x) for x in mos.split('.')) <= (13, 0)
+          and len(exe) > 0
+          and os.path.isfile(os.path.join(d, exe)))
+except Exception as e:
+    ok = False
+    exe, bid, mos = '?', '?', '?'
+print('PLIST_OK' if ok else f'PLIST_BAD exe={exe!r} bid={bid!r} mos={mos!r}')
+EOF
+)"
+[[ "$PLIST_OK" == PLIST_OK ]] || { echo "VERIFY FAIL #8: Info.plist невалиден ($PLIST_OK)"; exit 1; }
+echo "VERIFY OK #8: Info.plist (identifier/min-os <13.0/executable совпадает с файлом)"
+
+# --- 9. Сводка ---
+IPA_SIZE="$(stat -c%s "$IPA" 2>/dev/null || stat -f%z "$IPA")"
+BIN_SIZE="$(stat -c%s "$BIN" 2>/dev/null || stat -f%z "$BIN")"
+SHA="$(sha256sum "$IPA" 2>/dev/null | cut -c1-16 || shasum -a 256 "$IPA" | cut -c1-16)"
+echo "VERIFY OK #9: ipa=${IPA_SIZE}B sha256=${SHA}… bin=${BIN_SIZE}B swift=[$(echo "$SECTS" | tr '\n' ',' | sed 's/,$//')] dylibs=$(echo "$DYLIBS" | wc -l)"
 echo "VERIFY ALL PASSED: $IPA"
 VEOF
     chmod +x "$PROJ_DIR/verify_ipa.sh"
@@ -584,8 +640,10 @@ EOF
 
     log "[toolchain] smoke: ./package_ipa.sh"
     ./package_ipa.sh || {
-        echo "package_ipa.sh упал. Логи: make package FINALPACKAGE=1 USE_SWIFT=0"
-        make package FINALPACKAGE=1 USE_SWIFT=0 || true
+        echo "package_ipa.sh упал (включая verify_ipa.sh). Тихого ObjC-фолбэка нет:" >&2
+        echo "если в логе 'module compiled with Swift X.Y' — неверная пара тулчейн/SDK." >&2
+        echo "Чинится НЕ фолбэком: bash mint_ios_setup.sh --doctor" >&2
+        exit 1
     }
     echo "ГОТОВО [toolchain]: $PROJ_DIR + packages/*.ipa"
 }

@@ -21,9 +21,13 @@ if [[ -n "${IOS_DEPLOY_TARGET:-}" ]]; then
 fi
 echo "[IPA] make package FINALPACKAGE=1 ..."
 if ! make package FINALPACKAGE=1 "${MAKE_EXTRA[@]}"; then
-    echo "[IPA] WARN: make package упал — пробую голый make + ldid-пакировщик..."
+    echo "[IPA] WARN: make package упал — пробую голый make (без переупаковки)..."
     make clean >/dev/null 2>&1 || true
-    make FINALPACKAGE=1 USE_SWIFT=0 "${MAKE_EXTRA[@]}"
+    make FINALPACKAGE=1 "${MAKE_EXTRA[@]}" || {
+        echo "[IPA] ERROR: сборка не взлетела. Если в логе 'module compiled with Swift X.Y' —" >&2
+        echo "[IPA] ERROR: неверная пара тулчейн/SDK, чинится НЕ фолбэком: bash mint_ios_setup.sh --doctor" >&2
+        exit 1
+    }
 fi
 BUNDLE="$(find .theos _ -type d -name "$APP_NAME.app" 2>/dev/null | head -1 || true)"
 if [[ -z "$BUNDLE" ]]; then

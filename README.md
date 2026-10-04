@@ -37,12 +37,15 @@ cd ~/ios_projects/HelloHybrid && ./package_ipa.sh
 
 Цепочка: Theos (`~/theos`, clang + `iPhoneOS.sdk`) → Mach-O arm64 →
 `ldid -S` (ad-hoc) → `Payload/App.app` → zip в `.ipa`.
-Демо-проект — `UIViewController`/`UIView` на ObjC с Swift-фолбэком.
+Демо-проект — смешанный ObjC↔Swift в одном бинаре (`Counter`/`Greeter`, оба направления).
 Установка: Filza/Sileo (джейл) либо AltStore/Sideloadly + Apple ID.
 AltServer и Sideloadly под Linux не существуют — с этой машины доставить `.ipa`
 на недевайл нельзя. Рабочий путь без Mac и без джейла: LiveContainer — лаунчер,
-принимающий неподписанные `.ipa` внутрь контейнера (iOS ниже 26, лимит слотов
-и 7 дней повисают только на самом контейнере). Первичная установка LiveContainer
+принимающий неподписанные `.ipa` внутрь контейнера (формулировка апстрима:
+«Run iOS apps without actually installing them», лимит бесплатного аккаунта
+3 app / 10 app ID здесь не действует — один app ID на контейнер; в свежих
+релизах есть мультизапуск нескольких приложений одновременно; ограничения
+зависят от версии — сверяйся с апстримом: https://github.com/LiveContainer/LiveContainer). Первичная установка LiveContainer
 с Linux: SideServer-for-Linux (форк AltLinux) или SideStore Connect (prebuilt docker,
 x86/arm64). `ideviceinstaller` из libimobiledevice не подходит: транспорт есть,
 а установка падает, потому что у ad-hoc-подписи нет provisioning-профиля.
